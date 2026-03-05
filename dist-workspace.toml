@@ -22,7 +22,9 @@ cargo-dist-version = "0.31.0"
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
-installers = ["shell", "powershell", "npm"]
+installers = ["shell", "powershell", "npm", "homebrew"]
+# Homebrew tap repository for `brew install gws`
+tap = "googleworkspace/homebrew-tap"
 # Publish jobs to run
 publish-jobs = ["npm"]
 npm-scope = "@googleworkspace"
