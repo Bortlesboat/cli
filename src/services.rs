@@ -215,12 +215,63 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_service_all_aliases() {
+        // Verify every alias in SERVICES resolves correctly
+        for entry in SERVICES {
+            for alias in entry.aliases {
+                let (api_name, version) = resolve_service(alias)
+                    .unwrap_or_else(|_| panic!("alias '{}' should resolve", alias));
+                assert_eq!(api_name, entry.api_name, "alias '{}' wrong api_name", alias);
+                assert_eq!(version, entry.version, "alias '{}' wrong version", alias);
+            }
+        }
+    }
+
+    #[test]
     fn test_resolve_service_unknown() {
         let err = resolve_service("unknown_service");
         assert!(err.is_err());
         match err.unwrap_err() {
             GwsError::Validation(msg) => assert!(msg.contains("Unknown service")),
             _ => panic!("Expected Validation error"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_service_case_sensitive() {
+        // Service names should be case-sensitive
+        assert!(resolve_service("Drive").is_err());
+        assert!(resolve_service("GMAIL").is_err());
+    }
+
+    #[test]
+    fn test_resolve_service_empty_string() {
+        assert!(resolve_service("").is_err());
+    }
+
+    #[test]
+    fn test_resolve_service_error_lists_known_services() {
+        let err = resolve_service("nonexistent");
+        match err.unwrap_err() {
+            GwsError::Validation(msg) => {
+                assert!(msg.contains("drive"), "error should list 'drive': {msg}");
+                assert!(msg.contains("gmail"), "error should list 'gmail': {msg}");
+            }
+            _ => panic!("Expected Validation error"),
+        }
+    }
+
+    #[test]
+    fn test_no_duplicate_aliases() {
+        let mut seen = std::collections::HashSet::new();
+        for entry in SERVICES {
+            for alias in entry.aliases {
+                assert!(
+                    seen.insert(*alias),
+                    "duplicate alias '{}' found in SERVICES",
+                    alias
+                );
+            }
         }
     }
 }

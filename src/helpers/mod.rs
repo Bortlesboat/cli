@@ -63,3 +63,52 @@ pub fn get_helper(service: &str) -> Option<Box<dyn Helper>> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_helper_known_services() {
+        let known = [
+            "gmail",
+            "sheets",
+            "docs",
+            "chat",
+            "drive",
+            "calendar",
+            "script",
+            "apps-script",
+            "workspaceevents",
+            "modelarmor",
+            "workflow",
+        ];
+        for service in known {
+            assert!(
+                get_helper(service).is_some(),
+                "expected helper for '{service}'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_get_helper_unknown_returns_none() {
+        assert!(get_helper("unknown").is_none());
+        assert!(get_helper("").is_none());
+        assert!(get_helper("Gmail").is_none()); // case-sensitive
+    }
+
+    #[test]
+    fn test_get_helper_script_alias() {
+        // Both "script" and "apps-script" should return a helper
+        assert!(get_helper("script").is_some());
+        assert!(get_helper("apps-script").is_some());
+    }
+
+    #[test]
+    fn test_helper_default_not_helper_only() {
+        // Default implementation of helper_only() should return false
+        let helper = get_helper("gmail").unwrap();
+        assert!(!helper.helper_only());
+    }
+}
