@@ -1,5 +1,21 @@
 # @googleworkspace/cli
 
+## 0.3.5
+
+### Patch Changes
+
+- 4bca693: fix: credential masking panic and silent token write errors
+
+  Fixed `gws auth export` masking which panicked on short strings and showed
+  the entire secret instead of masking it. Also fixed silent token cache write
+  failures in `save_to_disk` that returned `Ok(())` even when the write failed.
+
+- f84ce37: Fix URL template path expansion to safely encode path parameters, including
+  Sheets `range` values with Unicode and reserved characters. `{var}` expansions
+  now encode as a path segment, `{+var}` preserves slashes while encoding each
+  segment, and invalid path parameter/template mismatches fail fast.
+- eb0347a: fix: correct author email typo in package.json
+
 ## 0.3.4
 
 ### Patch Changes
