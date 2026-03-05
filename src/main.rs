@@ -238,7 +238,11 @@ async fn run() -> Result<(), GwsError> {
     // Authenticate: try OAuth, otherwise proceed unauthenticated
     let (token, auth_method) = match auth::get_token(&scopes, account.as_deref()).await {
         Ok(t) => (Some(t), executor::AuthMethod::OAuth),
-        Err(_) => (None, executor::AuthMethod::None),
+        Err(e) => {
+            eprintln!("warning: authentication failed: {e:#}");
+            eprintln!("hint: run `gws auth login` to authenticate, or set GOOGLE_WORKSPACE_CLI_TOKEN");
+            (None, executor::AuthMethod::None)
+        }
     };
 
     // Execute
