@@ -15,10 +15,12 @@
 use super::Helper;
 pub mod send;
 pub mod triage;
+pub mod unsubscribe;
 pub mod watch;
 
 use send::handle_send;
 use triage::handle_triage;
+use unsubscribe::handle_unsubscribe;
 use watch::handle_watch;
 
 pub(super) use crate::auth;
@@ -112,6 +114,50 @@ EXAMPLES:
 TIPS:
   Read-only — never modifies your mailbox.
   Defaults to table output format.",
+                ),
+        );
+
+        cmd = cmd.subcommand(
+            Command::new("+unsubscribe")
+                .about("[Helper] List and one-click unsubscribe from mailing lists (RFC 8058)")
+                .arg(
+                    Arg::new("list")
+                        .long("list")
+                        .help("Scan recent emails for List-Unsubscribe headers, group by sender")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("from")
+                        .long("from")
+                        .help("Unsubscribe from a specific sender (matches against From header)")
+                        .value_name("SENDER"),
+                )
+                .arg(
+                    Arg::new("dry-run")
+                        .long("dry-run")
+                        .help("Show what would happen without executing the unsubscribe")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("max")
+                        .long("max")
+                        .help("Maximum messages to scan (default: 100)")
+                        .default_value("100")
+                        .value_name("N"),
+                )
+                .after_help(
+                    "\
+EXAMPLES:
+  gws gmail +unsubscribe --list
+  gws gmail +unsubscribe --list --max 200
+  gws gmail +unsubscribe --from noreply@mail.example.com
+  gws gmail +unsubscribe --from example.com --dry-run
+
+TIPS:
+  Uses RFC 8058 one-click unsubscribe when available (POST with
+  List-Unsubscribe=One-Click body). Falls back to showing mailto
+  addresses for senders without RFC 8058 support.
+  Use --dry-run to preview the unsubscribe action safely.",
                 ),
         );
 
@@ -217,6 +263,11 @@ TIPS:
                 return Ok(true);
             }
 
+            if let Some(matches) = matches.subcommand_matches("+unsubscribe") {
+                handle_unsubscribe(matches).await?;
+                return Ok(true);
+            }
+
             if let Some(matches) = matches.subcommand_matches("+watch") {
                 handle_watch(matches, sanitize_config).await?;
                 return Ok(true);
@@ -242,5 +293,6 @@ mod tests {
         let subcommands: Vec<_> = cmd.get_subcommands().map(|s| s.get_name()).collect();
         assert!(subcommands.contains(&"+watch"));
         assert!(subcommands.contains(&"+send"));
+        assert!(subcommands.contains(&"+unsubscribe"));
     }
 }
