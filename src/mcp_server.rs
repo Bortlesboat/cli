@@ -219,7 +219,7 @@ async fn handle_request(
             }
             let tools = match tools_cache.as_ref() {
                 Some(t) => json!(t),
-                None => json!([]),
+                None => unreachable!("tools_cache is guaranteed to be Some by the preceding check"),
             };
             Ok(json!({
                 "tools": tools
@@ -746,9 +746,9 @@ async fn handle_tools_call(params: &Value, config: &ServerConfig) -> Result<Valu
         }
     }
 
-    let method_name = parts.last().ok_or_else(|| {
-        GwsError::Validation(format!("Invalid tool name (empty): {}", tool_name))
-    })?;
+    let method_name = parts
+        .last()
+        .expect("split() on a &str always yields at least one element");
     let method = if let Some(res) = current_res {
         res.methods
             .get(*method_name)
