@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use serde::Deserialize;
 
 /// Top-level Discovery REST Description document.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RestDescription {
     pub name: String,
@@ -44,23 +44,23 @@ pub struct RestDescription {
     pub auth: Option<AuthDescription>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct AuthDescription {
     pub oauth2: Option<OAuth2Description>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct OAuth2Description {
     pub scopes: Option<HashMap<String, ScopeDescription>>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct ScopeDescription {
     pub description: Option<String>,
 }
 
 /// A resource in the Discovery Document, which can contain methods and nested sub-resources.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct RestResource {
     #[serde(default)]
     pub methods: HashMap<String, RestMethod>,
@@ -69,7 +69,7 @@ pub struct RestResource {
 }
 
 /// A single API method.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RestMethod {
     pub id: Option<String>,
@@ -93,27 +93,27 @@ pub struct RestMethod {
 }
 
 /// Media upload metadata from the Discovery Document.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct MediaUpload {
     pub protocols: Option<MediaUploadProtocols>,
     pub accept: Option<Vec<String>>,
 }
 
 /// Upload protocol details.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct MediaUploadProtocols {
     pub simple: Option<MediaUploadProtocol>,
 }
 
 /// A single upload protocol entry.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct MediaUploadProtocol {
     pub path: String,
     pub multipart: Option<bool>,
 }
 
 /// A reference to a schema (e.g., `{ "$ref": "File" }`).
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct SchemaRef {
     #[serde(rename = "$ref")]
     pub schema_ref: Option<String>,
