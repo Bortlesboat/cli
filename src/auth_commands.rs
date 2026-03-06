@@ -140,6 +140,10 @@ pub async fn handle_auth_command(args: &[String]) -> Result<(), GwsError> {
         "           --scopes         Comma-separated custom scopes\n",
         "           -s, --services   Comma-separated service names to limit scope picker\n",
         "                            (e.g. -s drive,gmail,sheets)\n",
+        "           --port PORT      Use a fixed port for the OAuth redirect listener\n",
+        "                            (useful for SSH port-forwarding to a remote machine)\n",
+        "           --no-browser     Use interactive copy-paste flow instead of opening\n",
+        "                            a browser (for headless/remote machines)\n",
         "  setup    Configure GCP project + OAuth client (requires gcloud)\n",
         "           --project        Use a specific GCP project\n",
         "  status   Show current authentication state\n",
@@ -209,10 +213,24 @@ impl yup_oauth2::authenticator_delegate::InstalledFlowDelegate for CliFlowDelega
     }
 }
 
-async fn handle_login(args: &[String]) -> Result<(), GwsError> {
-    // Extract --account and -s/--services from args
+/// Parsed result of `gws auth login` arguments.
+struct LoginArgs {
+    account_email: Option<String>,
+    services_filter: Option<HashSet<String>>,
+    port: Option<u16>,
+    no_browser: bool,
+    filtered_args: Vec<String>,
+}
+
+/// Parse `gws auth login` flags from the raw argument list.
+///
+/// Extracts `--account`, `-s`/`--services`, `--port`, and `--no-browser`,
+/// returning the remaining args in `filtered_args` for scope resolution.
+fn parse_login_args(args: &[String]) -> Result<LoginArgs, GwsError> {
     let mut account_email: Option<String> = None;
     let mut services_filter: Option<HashSet<String>> = None;
+    let mut port: Option<u16> = None;
+    let mut no_browser = false;
     let mut filtered_args: Vec<String> = Vec::new();
     let mut skip_next = false;
     for i in 0..args.len() {
@@ -227,6 +245,28 @@ async fn handle_login(args: &[String]) -> Result<(), GwsError> {
         }
         if let Some(value) = args[i].strip_prefix("--account=") {
             account_email = Some(value.to_string());
+            continue;
+        }
+        if args[i] == "--port" && i + 1 < args.len() {
+            port = Some(args[i + 1].parse::<u16>().map_err(|_| {
+                GwsError::Validation(format!(
+                    "Invalid port number '{}'. Must be a number between 1 and 65535.",
+                    args[i + 1]
+                ))
+            })?);
+            skip_next = true;
+            continue;
+        }
+        if let Some(value) = args[i].strip_prefix("--port=") {
+            port = Some(value.parse::<u16>().map_err(|_| {
+                GwsError::Validation(format!(
+                    "Invalid port number '{value}'. Must be a number between 1 and 65535."
+                ))
+            })?);
+            continue;
+        }
+        if args[i] == "--no-browser" {
+            no_browser = true;
             continue;
         }
         let services_str = if (args[i] == "-s" || args[i] == "--services") && i + 1 < args.len() {
@@ -248,6 +288,23 @@ async fn handle_login(args: &[String]) -> Result<(), GwsError> {
         }
         filtered_args.push(args[i].clone());
     }
+    Ok(LoginArgs {
+        account_email,
+        services_filter,
+        port,
+        no_browser,
+        filtered_args,
+    })
+}
+
+async fn handle_login(args: &[String]) -> Result<(), GwsError> {
+    let LoginArgs {
+        account_email,
+        services_filter,
+        port,
+        no_browser,
+        filtered_args,
+    } = parse_login_args(args)?;
 
     // Resolve client_id and client_secret:
     // 1. Env vars (highest priority)
@@ -310,9 +367,17 @@ async fn handle_login(args: &[String]) -> Result<(), GwsError> {
             .map_err(|e| GwsError::Validation(format!("Failed to create config directory: {e}")))?;
     }
 
+    let flow_method = if let Some(p) = port {
+        yup_oauth2::InstalledFlowReturnMethod::HTTPPortRedirect(p)
+    } else if no_browser {
+        yup_oauth2::InstalledFlowReturnMethod::Interactive
+    } else {
+        yup_oauth2::InstalledFlowReturnMethod::HTTPRedirect
+    };
+
     let auth = yup_oauth2::InstalledFlowAuthenticator::builder(
         secret,
-        yup_oauth2::InstalledFlowReturnMethod::HTTPRedirect,
+        flow_method,
     )
     .with_storage(Box::new(crate::token_storage::EncryptedTokenStorage::new(
         temp_path.clone(),
@@ -2183,5 +2248,89 @@ mod tests {
     fn mask_secret_boundary() {
         // Exactly 9 chars — first 4 + last 4 with "..." in between
         assert_eq!(mask_secret("123456789"), "1234...6789");
+    }
+
+    // --- parse_login_args tests ---
+
+    #[test]
+    fn parse_login_args_no_flags() {
+        let args: Vec<String> = vec![];
+        let parsed = parse_login_args(&args).unwrap();
+        assert!(parsed.account_email.is_none());
+        assert!(parsed.port.is_none());
+        assert!(!parsed.no_browser);
+        assert!(parsed.filtered_args.is_empty());
+    }
+
+    #[test]
+    fn parse_login_args_port_space() {
+        let args: Vec<String> = vec!["--port".into(), "8080".into()];
+        let parsed = parse_login_args(&args).unwrap();
+        assert_eq!(parsed.port, Some(8080));
+        assert!(!parsed.no_browser);
+        assert!(parsed.filtered_args.is_empty());
+    }
+
+    #[test]
+    fn parse_login_args_port_equals() {
+        let args: Vec<String> = vec!["--port=9090".into()];
+        let parsed = parse_login_args(&args).unwrap();
+        assert_eq!(parsed.port, Some(9090));
+    }
+
+    #[test]
+    fn parse_login_args_port_invalid() {
+        let args: Vec<String> = vec!["--port".into(), "notanumber".into()];
+        let result = parse_login_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_login_args_port_equals_invalid() {
+        let args: Vec<String> = vec!["--port=999999".into()];
+        let result = parse_login_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_login_args_no_browser_flag() {
+        let args: Vec<String> = vec!["--no-browser".into()];
+        let parsed = parse_login_args(&args).unwrap();
+        assert!(parsed.no_browser);
+        assert!(parsed.port.is_none());
+    }
+
+    #[test]
+    fn parse_login_args_port_and_no_browser() {
+        let args: Vec<String> = vec!["--port".into(), "3000".into(), "--no-browser".into()];
+        let parsed = parse_login_args(&args).unwrap();
+        assert_eq!(parsed.port, Some(3000));
+        assert!(parsed.no_browser);
+    }
+
+    #[test]
+    fn parse_login_args_preserves_other_flags() {
+        let args: Vec<String> = vec![
+            "--readonly".into(),
+            "--port".into(),
+            "8080".into(),
+            "--full".into(),
+        ];
+        let parsed = parse_login_args(&args).unwrap();
+        assert_eq!(parsed.port, Some(8080));
+        assert_eq!(parsed.filtered_args, vec!["--readonly", "--full"]);
+    }
+
+    #[test]
+    fn parse_login_args_account_with_port() {
+        let args: Vec<String> = vec![
+            "--account".into(),
+            "user@example.com".into(),
+            "--port".into(),
+            "4040".into(),
+        ];
+        let parsed = parse_login_args(&args).unwrap();
+        assert_eq!(parsed.account_email.as_deref(), Some("user@example.com"));
+        assert_eq!(parsed.port, Some(4040));
     }
 }
