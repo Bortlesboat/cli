@@ -23,6 +23,22 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+/// Maps a tool name to its exact service, resource path, and method so that
+/// `handle_tools_call` can resolve tools without ambiguous `_`-splitting.
+#[derive(Debug, Clone)]
+struct ToolMapping {
+    service: String,
+    resource_path: Vec<String>,
+    method: String,
+}
+
+/// Cached tools list alongside the registry for resolving tool names.
+#[derive(Debug, Clone)]
+struct ToolsCache {
+    tools: Vec<Value>,
+    registry: HashMap<String, ToolMapping>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ToolMode {
     Full,
@@ -112,7 +128,7 @@ pub async fn start(args: &[String]) -> Result<(), GwsError> {
     let mut stdout = tokio::io::stdout();
 
     // Cache to hold generated tools configuration so we do not spam fetch from Google discovery
-    let mut tools_cache = None;
+    let mut tools_cache: Option<ToolsCache> = None;
 
     while let Ok(Some(line)) = stdin.next_line().await {
         if line.trim().is_empty() {
@@ -187,7 +203,7 @@ async fn handle_request(
     method: &str,
     params: &Value,
     config: &ServerConfig,
-    tools_cache: &mut Option<Vec<Value>>,
+    tools_cache: &mut Option<ToolsCache>,
 ) -> Result<Value, GwsError> {
     match method {
         "initialize" => Ok(json!({
@@ -209,14 +225,15 @@ async fn handle_request(
                 *tools_cache = Some(build_tools_list(config).await?);
             }
             Ok(json!({
-                "tools": tools_cache.as_ref().unwrap()
+                "tools": tools_cache.as_ref().unwrap().tools
             }))
         }
         "tools/call" => {
             // MCP spec: tool execution errors should be returned as successful results
             // with isError: true, NOT as JSON-RPC protocol errors. Returning JSON-RPC
             // errors causes clients to show generic "Tool execution failed" with no detail.
-            match handle_tools_call(params, config).await {
+            let registry = tools_cache.as_ref().map(|c| &c.registry);
+            match handle_tools_call(params, config, registry).await {
                 Ok(val) => Ok(val),
                 Err(e) => Ok(json!({
                     "content": [{ "type": "text", "text": e.to_string() }],
@@ -231,19 +248,20 @@ async fn handle_request(
     }
 }
 
-async fn build_tools_list(config: &ServerConfig) -> Result<Vec<Value>, GwsError> {
+async fn build_tools_list(config: &ServerConfig) -> Result<ToolsCache, GwsError> {
     if config.tool_mode == ToolMode::Compact {
         return build_compact_tools_list(config).await;
     }
 
     let mut tools = Vec::new();
+    let mut registry = HashMap::new();
 
     // 1. Walk core services
     for svc_name in &config.services {
         let (api_name, version) =
             crate::parse_service_and_version(&[svc_name.to_string()], svc_name)?;
         if let Ok(doc) = crate::discovery::fetch_discovery_document(&api_name, &version).await {
-            walk_resources(&doc.name, &doc.resources, &mut tools);
+            walk_resources(svc_name, &[], &doc.resources, &mut tools, &mut registry);
         } else {
             eprintln!("[gws mcp] Warning: Failed to load discovery document for service '{}'. It will not be available as a tool.", svc_name);
         }
@@ -254,10 +272,10 @@ async fn build_tools_list(config: &ServerConfig) -> Result<Vec<Value>, GwsError>
         append_workflow_tools(&mut tools);
     }
 
-    Ok(tools)
+    Ok(ToolsCache { tools, registry })
 }
 
-async fn build_compact_tools_list(config: &ServerConfig) -> Result<Vec<Value>, GwsError> {
+async fn build_compact_tools_list(config: &ServerConfig) -> Result<ToolsCache, GwsError> {
     let mut tools = Vec::new();
 
     for svc_name in &config.services {
@@ -354,7 +372,11 @@ async fn build_compact_tools_list(config: &ServerConfig) -> Result<Vec<Value>, G
         append_workflow_tools(&mut tools);
     }
 
-    Ok(tools)
+    // Compact mode does not need the registry
+    Ok(ToolsCache {
+        tools,
+        registry: HashMap::new(),
+    })
 }
 
 fn append_workflow_tools(tools: &mut Vec<Value>) {
@@ -415,9 +437,19 @@ fn append_workflow_tools(tools: &mut Vec<Value>) {
     }));
 }
 
-fn walk_resources(prefix: &str, resources: &HashMap<String, RestResource>, tools: &mut Vec<Value>) {
+fn walk_resources(
+    service: &str,
+    resource_path: &[String],
+    resources: &HashMap<String, RestResource>,
+    tools: &mut Vec<Value>,
+    registry: &mut HashMap<String, ToolMapping>,
+) {
     for (res_name, res) in resources {
-        let new_prefix = format!("{}_{}", prefix, res_name);
+        let mut current_path = resource_path.to_vec();
+        current_path.push(res_name.clone());
+
+        // Build the underscore-joined prefix: service_res1_res2_...
+        let new_prefix = format!("{}_{}", service, current_path.join("_"));
 
         for (method_name, method) in &res.methods {
             let tool_name = format!("{}_{}", new_prefix, method_name);
@@ -425,6 +457,16 @@ fn walk_resources(prefix: &str, resources: &HashMap<String, RestResource>, tools
             if description.is_empty() {
                 description = format!("Execute the {} Google API method", tool_name);
             }
+
+            // Register the mapping so handle_tools_call can resolve by exact match
+            registry.insert(
+                tool_name.clone(),
+                ToolMapping {
+                    service: service.to_string(),
+                    resource_path: current_path.clone(),
+                    method: method_name.clone(),
+                },
+            );
 
             // Generate JSON Schema for MCP input — only include body/upload
             // when the Discovery Document method actually supports them.
@@ -477,7 +519,7 @@ fn walk_resources(prefix: &str, resources: &HashMap<String, RestResource>, tools
 
         // Recurse into sub-resources
         if !res.resources.is_empty() {
-            walk_resources(&new_prefix, &res.resources, tools);
+            walk_resources(service, &current_path, &res.resources, tools, registry);
         }
     }
 }
@@ -655,7 +697,11 @@ fn find_resource<'a>(
     Some(current_res)
 }
 
-async fn handle_tools_call(params: &Value, config: &ServerConfig) -> Result<Value, GwsError> {
+async fn handle_tools_call(
+    params: &Value,
+    config: &ServerConfig,
+    registry: Option<&HashMap<String, ToolMapping>>,
+) -> Result<Value, GwsError> {
     let tool_name = params
         .get("name")
         .and_then(|n| n.as_str())
@@ -714,7 +760,48 @@ async fn handle_tools_call(params: &Value, config: &ServerConfig) -> Result<Valu
         return execute_mcp_method(&doc, method, arguments).await;
     }
 
-    // Full mode: tool_name encodes service_resource_method (e.g., drive_files_list)
+    // Full mode: look up the tool name in the registry for unambiguous resolution.
+    // The registry is built during tools/list and maps each tool name to its exact
+    // service, resource path, and method -- avoiding the ambiguous _-splitting that
+    // breaks on multi-word resource names like printServers.
+    if let Some(reg) = registry {
+        if let Some(mapping) = reg.get(tool_name) {
+            let (api_name, version) = crate::parse_service_and_version(
+                &[mapping.service.clone()],
+                &mapping.service,
+            )?;
+            let doc = crate::discovery::fetch_discovery_document(&api_name, &version).await?;
+
+            // Walk the resource path to find the target resource
+            let mut current_resources = &doc.resources;
+            let mut current_res = None;
+            for segment in &mapping.resource_path {
+                match current_resources.get(segment) {
+                    Some(res) => {
+                        current_res = Some(res);
+                        current_resources = &res.resources;
+                    }
+                    None => {
+                        return Err(GwsError::Validation(format!(
+                            "Resource '{}' not found in Discovery Document",
+                            segment
+                        )));
+                    }
+                }
+            }
+
+            let method = current_res
+                .and_then(|res| res.methods.get(&mapping.method))
+                .ok_or_else(|| {
+                    GwsError::Validation(format!("Method '{}' not found", mapping.method))
+                })?;
+
+            return execute_mcp_method(&doc, method, arguments).await;
+        }
+    }
+
+    // Fallback: parse by splitting on '_' (for backwards compatibility when
+    // tools/call is invoked before tools/list, i.e. registry is not yet built)
     let parts: Vec<&str> = tool_name.split('_').collect();
     if parts.len() < 3 {
         return Err(GwsError::Validation(format!(
@@ -1149,4 +1236,57 @@ mod tests {
         assert_eq!(tools[0]["name"], "workflow_standup_report");
         assert_eq!(tools[4]["name"], "workflow_file_announce");
     }
+    // -- walk_resources + registry tests --
+
+    #[test]
+    fn test_walk_resources_builds_registry() {
+        let doc = mock_doc();
+        let mut tools = Vec::new();
+        let mut registry = HashMap::new();
+        walk_resources("drive", &[], &doc.resources, &mut tools, &mut registry);
+        assert!(registry.contains_key("drive_files_list"));
+        assert!(registry.contains_key("drive_files_get"));
+        let mapping = &registry["drive_files_list"];
+        assert_eq!(mapping.service, "drive");
+        assert_eq!(mapping.resource_path, vec!["files"]);
+        assert_eq!(mapping.method, "list");
+    }
+
+    #[test]
+    fn test_walk_resources_nested_registry() {
+        let doc = mock_nested_doc();
+        let mut tools = Vec::new();
+        let mut registry = HashMap::new();
+        walk_resources("gmail", &[], &doc.resources, &mut tools, &mut registry);
+        assert!(registry.contains_key("gmail_users_getProfile"));
+        assert!(registry.contains_key("gmail_users_messages_list"));
+        let mapping = &registry["gmail_users_messages_list"];
+        assert_eq!(mapping.service, "gmail");
+        assert_eq!(mapping.resource_path, vec!["users", "messages"]);
+        assert_eq!(mapping.method, "list");
+    }
+
+    #[test]
+    fn test_registry_resolves_multi_word_resource() {
+        let mut methods = HashMap::new();
+        methods.insert("list".to_string(), RestMethod {
+            http_method: "GET".to_string(),
+            path: "printServers".to_string(),
+            description: Some("Lists print servers".to_string()),
+            ..Default::default()
+        });
+        let mut resources = HashMap::new();
+        resources.insert("printServers".to_string(), RestResource {
+            methods, ..Default::default()
+        });
+        let mut tools = Vec::new();
+        let mut registry = HashMap::new();
+        walk_resources("admin", &[], &resources, &mut tools, &mut registry);
+        assert!(registry.contains_key("admin_printServers_list"));
+        let mapping = &registry["admin_printServers_list"];
+        assert_eq!(mapping.service, "admin");
+        assert_eq!(mapping.resource_path, vec!["printServers"]);
+        assert_eq!(mapping.method, "list");
+    }
+
 }
